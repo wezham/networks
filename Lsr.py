@@ -15,13 +15,14 @@ debug = 0
 LOCALHOST = "127.0.0.1"
 
 class Network:
-    def __init__(self, root):
+    def __init__(self, root, lock):
         self.root_id = root
         self.routers = list()
         self.router_hash = {}
         self.root_node = ""
+        self.lock = lock
 
-    def add_switch_by_packets(self, packet_array, identity):
+    def add_switch_by_packets(self, packet_array, identity, broadcast_hash):
         if identity not in self.router_hash:
             switch = Switch(identity)
             for n in packet_array:
@@ -32,34 +33,52 @@ class Network:
             self.routers.append(switch) 
             self.router_hash[identity] = switch
         else:
-            if len(packet_array) < len(self.router_hash.get(identity).links):
-                print("We have a link that has now been removed")
-                self.__find_broken_ids(identity, packet_array)
-            elif len(packet_array) > len([l for l in self.router_hash.get(identity).links if l.enabled]):
+            packet_length = len(packet_array)
+            enabled_switches = [l.edge_id for l in self.router_hash.get(identity).links if l.enabled]
+            num_enabled_switches = len(enabled_switches)
+            num_links = len(self.router_hash.get(identity).links)
+            if packet_length < num_links: ## Then a link is offline 
+                self.__find_broken_ids(identity, packet_array, broadcast_hash)
+            elif packet_length > num_enabled_switches:
                 print("A node has come back online")
+                self.enable_deactived_links(packet_array, enabled_switches, broadcast_hash)
 
-    def get_active_links(self):
-        return []
+    def enable_deactived_links(self, packet_array, enabled_switches, broadcast_hash):
+        packet_ids = [item.split(" ", 1)[0] for item in packet_array]
+        to_be_enabled = list(set(packet_ids) - set(enabled_switches))
+        for identifier in to_be_enabled:
+            print(f"Active Flipping for {identifier}")
+            self.flip_links_and_switch(identifier, True)
+            for k in broadcast_hash.keys():
+                if k != identifier:
+                    broadcast_hash[k] += 3
+        return True
 
-    def __find_broken_ids(self, identity, packet_array):
+    def __find_broken_ids(self, identity, packet_array, broadcast_hash):
         packet_ids = [item.split(" ", 1)[0] for item in packet_array]
         link_ids = [link.edge_id for link in self.router_hash.get(identity).links]
         to_be_disabled = list(set(link_ids)-set(packet_ids))
+        print(f"ID: {identity}")
+        print(f"PIDS: {packet_ids}")
+        print(f"LIDS: {link_ids}")
         for identifier in to_be_disabled:
             if self.router_hash.get(identifier).enabled:
                 print(f"I need to disable the following {to_be_disabled}")
-                self.disable_links_and_switch(identifier)
+                broadcast_hash.pop(identifier) ## Remove sequence number as if it never existed
+                for k in broadcast_hash.keys():
+                    broadcast_hash[k] += 3
+                self.flip_links_and_switch(identifier, False)
 
-    def disable_links_and_switch(self, id_to_disable):
+    def flip_links_and_switch(self, id_to_flip, switch_value):
         for switch in self.routers:
-            if switch.identity == id_to_disable:
-                print(f"Disabling Switch {switch.identity}")
-                switch.enabled = False
+            if switch.identity == id_to_flip:
+                print(f"Flipping Switch {switch.identity} to {switch_value}")
+                switch.enabled = switch_value
             else:
                 for link in switch.links:
-                    if link.edge_id == id_to_disable:
-                        print(f"Disabling link from {switch.identity} to {link.edge_id}")
-                        link.enabled = False
+                    if link.edge_id == id_to_flip:
+                        print(f"Flipping link from {switch.identity} to {link.edge_id} to {switch_value}")
+                        link.enabled = switch_value
         return True
 
     def add_root_router(self, neighbours, root):
@@ -113,7 +132,8 @@ class NRouter:
 
 class Router:
     def __init__(self, router_id, port, text_file):
-        self.graph = Network(router_id)
+        self.lock = threading.Lock()
+        self.graph = Network(router_id, self.lock)
         self.id = router_id
         self.port = int(port) 
         self.txt_file = text_file 
@@ -135,7 +155,7 @@ class Router:
         self.heartbeat_thread = threading.Timer(0.5, self.__send_heartbeat)
         self.expected_beats_thread = threading.Timer(0.5, self.__check_heartbeats)
         self.broadcast_behalf = None
-        self.lock = threading.Lock()
+       
 
     def __init_neighbours(self):
         f = open(self.txt_file, "r")
@@ -194,17 +214,27 @@ class Router:
         self.heartbeat_thread = threading.Timer(0.5, self.__send_heartbeat)
         self.heartbeat_thread.start()
 
+    
     def __check_heartbeats(self):
+        #if debug:
         print("Expected")
         print(self.expected_heartbeats)
         print("Actual")
         print(self.neighbour_heartbeats)
         print("______________________")
         for n in self.neighbours:
-            self.expected_heartbeats[n.id] += 1
-            if (self.expected_heartbeats[n.id]- self.neighbour_heartbeats[n.id]) >= 4 and n.enabled:
-                self.graph.disable_links_and_switch(n.id)
+            if n.enabled:
+                self.expected_heartbeats[n.id] += 1
+            if (self.expected_heartbeats[n.id] - self.neighbour_heartbeats[n.id]) >= 4 and n.enabled: ## Failed node 
+                print(f"Failed node {n.id} HAH")
+                self.graph.flip_links_and_switch(n.id, False)
                 n.enabled = False
+                self.expected_heartbeats[n.id] = self.neighbour_heartbeats[n.id]
+            if self.neighbour_heartbeats[n.id] - self.expected_heartbeats[n.id] >= 4: ## Node has come back online
+                print(f"Neighbour {n.id} back online")
+                self.graph.flip_links_and_switch(n.id, True)
+                n.enabled = True
+                self.expected_heartbeats[n.id] = self.neighbour_heartbeats[n.id]
                 
         self.expected_beats_thread.cancel()
         self.expected_beats_thread = threading.Timer(0.5, self.__check_heartbeats)
@@ -234,7 +264,6 @@ class Router:
                 
     
     def deconstruct_packet(self, packet):
-
         deconstructed = packet[0].decode().split("\r\n")
         if deconstructed[0] == "LSP":
             if debug:
@@ -246,7 +275,7 @@ class Router:
                 print("Invalid format for sequence #")
                 exit()
 
-            self.graph.add_switch_by_packets(packet[0].decode().split("\r\n")[3:], packet_id)
+            self.graph.add_switch_by_packets(packet[0].decode().split("\r\n")[3:], packet_id, self.broadcast_hash)
             if self.__should_broadcast(packet_id, sequence_num):
                 self.broadcast_behalf = threading.Timer(1.0, self.__broadcast_on_behalf,(packet[0], packet))
                 self.broadcast_behalf.start()
@@ -262,17 +291,18 @@ class Router:
             self.neighbour_heartbeats[heartbeat[1]] += 1
 
     def __should_broadcast(self, router_id, seq_num):
+        seq_num = int(seq_num)
+        print(self.broadcast_hash)
         if router_id in self.broadcast_hash:
-            if seq_num > self.broadcast_hash.get(router_id):
-                if debug:
-                    print(f"{self.id} Broadcasting on behalf of {router_id} sn: {seq_num}")
+            if seq_num > self.broadcast_hash.get(router_id): ## Seq Number and 5 and record is 4. This is a new packet 
+                #print(f"{self.id} Broadcasting on behalf of {router_id} sn: {seq_num}")
                 self.broadcast_hash[router_id] = seq_num
                 return True
             else:
-                if debug:
-                    print(f"BH: {router_id}, snum: {seq_num}")
+                #print("Not new")
                 return False
         else:
+            ## This is a never seen before packet its probably just been added or going to be. Rebroadcast 
             self.broadcast_hash[router_id] = seq_num
             return True
 
