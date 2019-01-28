@@ -32,9 +32,35 @@ class Network:
             self.routers.append(switch) 
             self.router_hash[identity] = switch
         else:
-            if debug:
-                print("Already Exists")
-        #self.print_network()
+            if len(packet_array) < len(self.router_hash.get(identity).links):
+                print("We have a link that has now been removed")
+                self.__find_broken_ids(identity, packet_array)
+            elif len(packet_array) > len([l for l in self.router_hash.get(identity).links if l.enabled]):
+                print("A node has come back online")
+
+    def get_active_links(self):
+        return []
+
+    def __find_broken_ids(self, identity, packet_array):
+        packet_ids = [item.split(" ", 1)[0] for item in packet_array]
+        link_ids = [link.edge_id for link in self.router_hash.get(identity).links]
+        to_be_disabled = list(set(link_ids)-set(packet_ids))
+        for identifier in to_be_disabled:
+            if self.router_hash.get(identifier).enabled:
+                print(f"I need to disable the following {to_be_disabled}")
+                self.disable_links_and_switch(identifier)
+
+    def disable_links_and_switch(self, id_to_disable):
+        for switch in self.routers:
+            if switch.identity == id_to_disable:
+                print(f"Disabling Switch {switch.identity}")
+                switch.enabled = False
+            else:
+                for link in switch.links:
+                    if link.edge_id == id_to_disable:
+                        print(f"Disabling link from {switch.identity} to {link.edge_id}")
+                        link.enabled = False
+        return True
 
     def add_root_router(self, neighbours, root):
         switch = Switch(root.id)
@@ -56,6 +82,7 @@ class Link:
     def __init__(self, edge_id, cost):
         self.edge_id = edge_id
         self.cost = cost
+        self.enabled = True
 
 class Switch: 
     def __init__(self, identity):
@@ -63,6 +90,7 @@ class Switch:
         self.previous = ""
         self.links = list()
         self.distance = 0
+        self.enabled = True
 
     def add_link(self, switch_link):
         if type(switch_link) == Link:
@@ -81,6 +109,7 @@ class NRouter:
         self.id = nrouter_id
         self.port = int(port) 
         self.cost = cost
+        self.enabled = True
 
 class Router:
     def __init__(self, router_id, port, text_file):
@@ -92,6 +121,8 @@ class Router:
         self.neighbour_count = 0
         self.heatbeat_count = 0
         self.neighbour_heartbeats = {}
+        self.expected_heartbeats = {}
+        self.begin_heartbeating = False
         self.udp_client = ""
         self.__init_neighbours()
         self.__init__client()
@@ -101,6 +132,8 @@ class Router:
         self.listen_thread= threading.Thread(target=self.listen_for_broadcast)
         self.broadcast_thread = threading.Timer(1.0, self.broadcast)
         self.routing_thread = threading.Timer(10.0, self.routify)
+        self.heartbeat_thread = threading.Timer(0.5, self.__send_heartbeat)
+        self.expected_beats_thread = threading.Timer(0.5, self.__check_heartbeats)
         self.broadcast_behalf = None
         self.lock = threading.Lock()
 
@@ -116,6 +149,7 @@ class Router:
                 neighbour = NRouter(nrouter_id=n[0], cost=n[1], port=n[2])
                 self.neighbours.append(neighbour)
                 self.neighbour_heartbeats[n[0]] = 0
+                self.expected_heartbeats[n[0]] = 0
                 
         self.graph.add_root_router(self.neighbours, self)
 
@@ -135,23 +169,46 @@ class Router:
     def __neig_string(self):
         base_string = ""
         for n in self.neighbours:
-            base_string += f"\r\n{n.id} {n.cost}"
+            if n.enabled:
+                base_string += f"\r\n{n.id} {n.cost}"
         
         self.lsp = base_string.encode()
         return self.lsp
 
     def construct_packet(self):
-        if self.lsp == "":
-            string = f"LSP\r\n{self.id}\r\nSEQ:{self.sequence_num}".encode() + self.__neig_string()
-        else:    
-            string = f"LSP\r\n{self.id}\r\nSEQ:{self.sequence_num}".encode() + self.lsp
-           
+        string = f"LSP\r\n{self.id}\r\nSEQ:{self.sequence_num}".encode() + self.__neig_string()
         self.sequence_num +=1
         return string
     
-    def construct_heartbeat(self):
-        return True
+    def __construct_heartbeat(self):
+        return f"HEARTBEAT {self.id}".encode()
 
+    def __send_heartbeat(self):
+        heartbeat = self.__construct_heartbeat()
+        self.lock.acquire()
+        for n in self.neighbours:
+            self.send_message(heartbeat, n.port)
+        
+        self.lock.release()
+        self.heartbeat_thread.cancel()
+        self.heartbeat_thread = threading.Timer(0.5, self.__send_heartbeat)
+        self.heartbeat_thread.start()
+
+    def __check_heartbeats(self):
+        print("Expected")
+        print(self.expected_heartbeats)
+        print("Actual")
+        print(self.neighbour_heartbeats)
+        print("______________________")
+        for n in self.neighbours:
+            self.expected_heartbeats[n.id] += 1
+            if (self.expected_heartbeats[n.id]- self.neighbour_heartbeats[n.id]) >= 4 and n.enabled:
+                self.graph.disable_links_and_switch(n.id)
+                n.enabled = False
+                
+        self.expected_beats_thread.cancel()
+        self.expected_beats_thread = threading.Timer(0.5, self.__check_heartbeats)
+        self.expected_beats_thread.start()
 
     def broadcast(self):
         if debug:
@@ -180,7 +237,8 @@ class Router:
 
         deconstructed = packet[0].decode().split("\r\n")
         if deconstructed[0] == "LSP":
-            print(deconstructed)
+            if debug:
+                print(deconstructed)
             packet_id = deconstructed[1]
             try:
                 sequence_num = deconstructed[2].split(":")[1]
@@ -194,6 +252,14 @@ class Router:
                 self.broadcast_behalf.start()
                 if debug:
                     print(f"Broadcasting on behalf of {packet_id}")
+        else:
+            if not self.begin_heartbeating and all(item == 0 for item in self.neighbour_heartbeats.values()):
+                self.begin_heartbeating = True
+                self.expected_beats_thread.start()
+            heartbeat = deconstructed[0].split(" ")
+            if debug:
+                print(heartbeat)
+            self.neighbour_heartbeats[heartbeat[1]] += 1
 
     def __should_broadcast(self, router_id, seq_num):
         if router_id in self.broadcast_hash:
@@ -220,10 +286,11 @@ class Router:
     def __fetch_queue(self):
         router_queue = list()
         for router in copy.copy(self.graph.routers):
-            if router.identity != self.graph.root_node.identity:
-                router.distance = 10000
-                router.previous = ""
-            router_queue.append(router)
+            if router.enabled:
+                if router.identity != self.graph.root_node.identity:
+                    router.distance = 10000
+                    router.previous = ""
+                router_queue.append(router)
         return router_queue
 
     def __recurse_route(self, path, node):
@@ -236,10 +303,17 @@ class Router:
     def print_route(self, path_list):
         print(f"I am router {self.id}")
         for switch in path_list.values():
-            if switch.identity != self.id:
+            if switch.identity != self.id and switch.enabled:
                 route = self.__recurse_route("", switch)
                 print(f"Least cost path to router {switch.identity}:{route} and the cost: {switch.distance}")
-                
+    
+    def __get_active_links(self, current_node):
+        active_links = []
+        for link in current_node.links:
+            if link.enabled:
+                active_links.append(link)
+        return active_links
+
     def __djikstra_algo(self):
         self.lock.acquire()
         unvisited_nodes = self.__fetch_queue()
@@ -252,7 +326,7 @@ class Router:
                 print(f"Visited {visited.keys()}")
                 print(f"Looking at {current.identity} cost is {current.distance}")
             visited[current.identity] = True
-            for link in current.links:
+            for link in self.__get_active_links(current):
                 if debug:
                     print(f"Looking at edge {current.identity}->{link.edge_id}")
                 if link.edge_id not in visited:
@@ -286,6 +360,7 @@ class Router:
             self.listen_thread.start()
             self.broadcast_thread.start()
             self.routing_thread.start()
+            self.heartbeat_thread.start()
         except Exception as e:
             print("Unable to start threads" + str(e))
         except KeyboardInterrupt:
