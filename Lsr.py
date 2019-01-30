@@ -286,18 +286,16 @@ class Router:
             for neighbour in neighb_array: 
                 neighbour_id, cost = neighbour.split(" ", 1)
                 router.add_link(destination_id=neighbour_id, cost=cost)
-            if self.neighbour_hash.get(identity, False):
+            if self.neighbour_hash.get(identity, False): ## If we are looking at a neighbour then start the heartbeat check
                 #print(f"Starting {identity} heartbeat thread")
-                self.neighbour_hash.get(identity).heartbeat_thread.start()
-
+                if not self.neighbour_hash.get(identity).heartbeat_thread.isAlive():
+                    self.neighbour_hash.get(identity).heartbeat_thread.start()
         else:
+
             # Check for a given router, do the neighbours match up
             router_to_check = self.graph.retrieve_router(identity)
             packet_ids = [n.split(" ", 1)[0] for n in neighb_array]
             packet_length = len(packet_ids)
-            print(packet_ids)
-            print(router_to_check.num_enabled_links)
-
             if packet_length < router_to_check.num_enabled_links: # We know a packet has been removed   
                 ids_to_disable = self.find_set_difference(bigger_set=[l.edge_id for l in router_to_check.links],smaller_set=packet_ids)
                 self.graph.disable_switches_and_links(ids_to_disable)
@@ -311,7 +309,6 @@ class Router:
             deconstructed = packet[0].decode().split("\r\n")
             packet_id = deconstructed[1]
             sequence_num = deconstructed[2].split(":")[1]
-            print(f"Recieved {deconstructed} {packet_id} {sequence_num}")
             if self.__should_broadcast(packet_id, int(sequence_num)): ## This is a new packet
                 self.perform_network_check(packet[0].decode().split("\r\n")[3:], packet_id)
                 self.__broadcast_on_behalf(packet=packet[0], excepted_id=packet_id)
@@ -443,6 +440,12 @@ class Router:
     ########################################################
     # These are all functions relating to routing 
     ########################################################
+    def start_neighbour_threads(self):
+        for neighbour in self.neighbours:
+            if not neighbour.heartbeat_thread.isAlive():
+                neighbour.heartbeat_thread.start()
+            else:
+                print("Is alive")
 
     def run(self):
         try: 
@@ -450,6 +453,8 @@ class Router:
             self.broadcast_thread.start()
             self.routing_thread.start()
             self.heartbeat_thread.start()
+            threading.Timer(float(self.neighbour_count)+1.0, self.start_neighbour_threads).start()
+
         except Exception as e:
             print("Unable to start threads" + str(e))
         except KeyboardInterrupt:
