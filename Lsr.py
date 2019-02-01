@@ -9,8 +9,8 @@ import pdb
 import copy
 import queue
 
-UPDATE_ROUTING_INTERVAL = 30
-LINK_STATE_INTERVAL = 1
+UPDATE_ROUTING_INTERVAL = 30.0
+LINK_STATE_INTERVAL = 1.0
 debug = 0
 LOCALHOST = "127.0.0.1"
 
@@ -48,7 +48,7 @@ class Network:
     def disable_switches_and_links(self, list_of_ids):
         for identifier in list_of_ids:
             if self.router_hash.get(identifier).enabled:
-                print(f"I need to disable the following {identifier}")
+                # print(f"I need to disable the following {identifier}")
                 self.flip_switch_and_links(identifier, False)
 
     def flip_switch_and_links(self, identifier, boolean_val):
@@ -82,13 +82,13 @@ class Switch:
         self.num_enabled_links = 0
 
     def toggle_status(self, status):
-        print(f"{self.identity} is {status}")
+        # print(f"{self.identity} is {status}")
         self.enabled = status
     
     def toggle_link_if_exists(self, identifier, status):
         for link in self.links:
             if link.edge_id == identifier:
-                print(f"{self.identity} => {link.edge_id} = {status}")
+                # print(f"{self.identity} => {link.edge_id} = {status}")
                 link.enabled = status
                 if status == False: 
                     self.num_enabled_links -= 1
@@ -136,14 +136,14 @@ class NRouter:
         if self.enabled:
             self.expected_heartbeats += 1
             if (self.expected_heartbeats - self.actual_heartbeats) >= 6:
-                print(f"Failed heartbeat Test. Turning off {self.id}")
+                # print(f"Failed heartbeat Test. Turning off {self.id}")
                 self.graph.flip_switch_and_links(self.id, False)
                 self.enabled = False
                 self.expected_heartbeats = 0
                 self.actual_heartbeats = 0
         
         if not self.enabled and (self.actual_heartbeats - self.expected_heartbeats >= 6): ## node has restarted
-            print(f"{self.id} has restarted")
+            # print(f"{self.id} has restarted")
             self.enabled = True
             self.actual_heartbeats = self.expected_heartbeats
             self.graph.flip_switch_and_links(self.id, True)
@@ -170,8 +170,8 @@ class Router:
         self.sequence_num = 0
         self.broadcast_hash = {}
         self.listen_thread= threading.Thread(target=self.listen_for_broadcast)
-        self.broadcast_thread = threading.Timer(1.0, self.broadcast)
-        self.routing_thread = threading.Timer(25.0, self.routify)
+        self.broadcast_thread = threading.Timer(LINK_STATE_INTERVAL, self.broadcast)
+        self.routing_thread = threading.Timer(UPDATE_ROUTING_INTERVAL, self.routify)
         self.heartbeat_thread = threading.Timer(0.5, self.__send_heartbeat)
         self.lock = threading.Lock()
 
@@ -238,7 +238,7 @@ class Router:
             self.send_message(packet, n.port)
         self.lock.release()
         self.broadcast_thread.cancel()
-        self.broadcast_thread = threading.Timer(1.0, self.broadcast)
+        self.broadcast_thread = threading.Timer(LINK_STATE_INTERVAL, self.broadcast)
         self.broadcast_thread.start()
     
     def construct_packet(self):
@@ -276,12 +276,12 @@ class Router:
                 if identity == self.id:
                     router = self.graph.retrieve_router(router_id)
                     if not [l.edge_id for l in router.links if l.edge_id == identity]:
-                        print(f"Adding link from {router.identity} to {self.id}")
+                        # print(f"Adding link from {router.identity} to {self.id}")
                         router.add_link(self.id, cost)
 
     def perform_network_check(self, neighb_array, identity):
         if not self.graph.exists_in_network(identity): 
-            print(f"{identity} does not exist. Creating with {neighb_array}")
+            # print(f"{identity} does not exist. Creating with {neighb_array}")
             router = self.graph.add_router(identity)
             for neighbour in neighb_array: 
                 neighbour_id, cost = neighbour.split(" ", 1)
@@ -305,16 +305,13 @@ class Router:
                 self.graph.enable_switches_and_links(ids_to_enable)
 
     def handle_lsp_packet(self, packet):
-        try:
-            deconstructed = packet[0].decode().split("\r\n")
-            packet_id = deconstructed[1]
-            sequence_num = deconstructed[2].split(":")[1]
-            if self.__should_broadcast(packet_id, int(sequence_num)): ## This is a new packet
-                self.perform_network_check(packet[0].decode().split("\r\n")[3:], packet_id)
-                self.__broadcast_on_behalf(packet=packet[0], excepted_id=packet_id)
-        except Exception as e:
-            print(f"Invalid format for sequence LSP packet {str(e)}")
-            return False
+        deconstructed = packet[0].decode().split("\r\n")
+        packet_id = deconstructed[1]
+        sequence_num = deconstructed[2].split(":")[1]
+        if self.__should_broadcast(packet_id, int(sequence_num)): ## This is a new packet
+            self.perform_network_check(packet[0].decode().split("\r\n")[3:], packet_id)
+            self.__broadcast_on_behalf(packet=packet[0], excepted_id=packet_id)
+
 
     #### Takes in broadcasts and hands them to processors
     def deconstruct_packet(self, packet):
@@ -324,10 +321,7 @@ class Router:
             self.handle_lsp_packet(packet)    
         else:
             identity, heartbeat_id = deconstructed[0].split(" ")
-            try:
-                self.neighbour_hash.get(heartbeat_id).actual_heartbeats += 1
-            except:
-                print("Neighbour doesn't exist")
+            self.neighbour_hash.get(heartbeat_id).actual_heartbeats += 1
 
     ### Checks via sequence numbers if we should pass on a pakcet or if its been transmitted before 
     def __should_broadcast(self, lsp_id, seq_num):
@@ -398,35 +392,21 @@ class Router:
 
     def __djikstra_algo(self):
         self.lock.acquire()
-        self.graph.print_network()
         unvisited_nodes = self.__fetch_queue()
         visited = {}
         while unvisited_nodes:
             unvisited_nodes.sort()
             current = unvisited_nodes[0]
             unvisited_nodes = unvisited_nodes[1:]
-            if debug:
-                print(f"Visited {visited.keys()}")
-                print(f"Looking at {current.identity} cost is {current.distance}")
             visited[current.identity] = True
             for link in self.__get_active_links(current):
-                if debug:
-                    print(f"Looking at edge {current.identity}->{link.edge_id}")
                 if link.edge_id not in visited:
                     destination = self.graph.router_hash.get(link.edge_id)
                     cost = current.distance + link.cost
-                    if debug:
-                        print(f"{link.edge_id} existing cost {destination.distance}")
-                        print(f"New cost {cost}")
-                    try:
-                        if cost < destination.distance:
-                            destination.distance = cost
-                            if debug:
-                                print(f"{link.edge_id} new cost: {cost}")
-                            destination.previous = current
-                    except Exception as e:
-                        print(destination)
-                        print(str(e))
+                    if cost < destination.distance:
+                        destination.distance = cost
+                        destination.previous = current
+                
 
         self.print_route(self.graph.router_hash)
         self.lock.release()
@@ -444,8 +424,6 @@ class Router:
         for neighbour in self.neighbours:
             if not neighbour.heartbeat_thread.isAlive():
                 neighbour.heartbeat_thread.start()
-            else:
-                print("Is alive")
 
     def run(self):
         try: 
@@ -460,12 +438,11 @@ class Router:
         except KeyboardInterrupt:
             exit()
 
-if len(sys.argv) != 5:
-    print("Usage: python3 Lsr.py ID PORT TXT DEBUG")
+if len(sys.argv) != 4:
+    print("Usage: python3 Lsr.py ID PORT TXT")
     exit() 
 else:
     router_id = sys.argv[1]
     port = sys.argv[2]
     text_file = sys.argv[3]
-    debug = True if sys.argv[4] == "1" else False
     Router(router_id=router_id, port=port, text_file=text_file).run()
