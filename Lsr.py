@@ -11,6 +11,7 @@ import queue
 
 UPDATE_ROUTING_INTERVAL = 30.0
 LINK_STATE_INTERVAL = 1.0
+HEARTBEAT_INTERVAL = 0.5
 LOCALHOST = "127.0.0.1"
 
 
@@ -124,7 +125,7 @@ class NRouter:
         self.port = int(port) 
         self.cost = cost
         self.enabled = True
-        self.heartbeat_thread = threading.Timer(0.5, self.__check_heartbeats)
+        self.heartbeat_thread = threading.Timer(HEARTBEAT_INTERVAL, self.__check_heartbeats)
         self.expected_heartbeats = 0
         self.actual_heartbeats = 0
         self.graph = graph
@@ -146,7 +147,7 @@ class NRouter:
             self.graph.flip_switch_and_links(self.id, True)
 
         self.heartbeat_thread.cancel()
-        self.heartbeat_thread = threading.Timer(0.5, self.__check_heartbeats)
+        self.heartbeat_thread = threading.Timer(HEARTBEAT_INTERVAL, self.__check_heartbeats)
         self.heartbeat_thread.start()
 
 class Router:
@@ -301,6 +302,8 @@ class Router:
             router_to_check = self.graph.retrieve_router(identity)
             packet_ids = [n.split(" ", 1)[0] for n in neighb_array]
             packet_length = len(packet_ids)
+            # print(f"Packet {packet_ids}")
+            # print(f"EL {[l.edge_id for l in router_to_check.links if l.enabled]}")
             if packet_length < router_to_check.num_enabled_links: # We know a packet has been removed   
                 ids_to_disable = self.find_set_difference(bigger_set=[l.edge_id for l in router_to_check.links],smaller_set=packet_ids)
                 self.graph.disable_switches_and_links(ids_to_disable)
@@ -410,11 +413,12 @@ class Router:
             visited[current.identity] = True
             for link in self.__get_active_links(current):
                 if link.edge_id not in visited:
-                    destination = self.graph.router_hash.get(link.edge_id)
-                    cost = current.distance + link.cost
-                    if cost < destination.distance:
-                        destination.distance = cost
-                        destination.previous = current
+                    if self.graph.exists_in_network(link.edge_id):
+                        destination = self.graph.router_hash.get(link.edge_id)
+                        cost = current.distance + link.cost
+                        if cost < destination.distance:
+                            destination.distance = cost
+                            destination.previous = current
                 
 
         self.print_route(self.graph.router_hash)
@@ -423,7 +427,7 @@ class Router:
     def routify(self):
         self.__djikstra_algo()
         self.routing_thread.cancel()
-        self.routing_thread = threading.Timer(25.0, self.routify)
+        self.routing_thread = threading.Timer(UPDATE_ROUTING_INTERVAL, self.routify)
         self.routing_thread.start()
     
     ########################################################
@@ -440,7 +444,7 @@ class Router:
             self.broadcast_thread.start()
             self.routing_thread.start()
             self.heartbeat_thread.start()
-            threading.Timer(float(self.neighbour_count)+1.0, self.start_neighbour_threads).start()
+            threading.Timer(float(self.neighbour_count)+LINK_STATE_INTERVAL, self.start_neighbour_threads).start()
 
         except Exception as e:
             print("Unable to start threads" + str(e))
