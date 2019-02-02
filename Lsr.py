@@ -1,5 +1,7 @@
-#!/usr/bin/env/python3.6
-
+###
+# Wesley Hamburger - z5017795
+# This must be run using python3 Lsr.py blah. If you run it wihtout it will not work. Thanks in advance :)
+###
 import sys 
 import socket as s
 from socket import socket
@@ -376,7 +378,7 @@ class Router:
         for switch in path_list.values():
             if switch.identity != self.id and switch.enabled:
                 route = self.__recurse_route("", switch)
-                print(f"Least cost path to router {switch.identity}:{route} and the cost: {switch.distance}")
+                print(f"Least cost path to router {switch.identity}:{route} and the cost: {round(switch.distance,1)}")
 
     def __fetch_queue(self):
         router_queue = list()
