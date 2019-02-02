@@ -11,7 +11,6 @@ import queue
 
 UPDATE_ROUTING_INTERVAL = 30.0
 LINK_STATE_INTERVAL = 1.0
-debug = 0
 LOCALHOST = "127.0.0.1"
 
 
